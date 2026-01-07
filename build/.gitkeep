@@ -1,0 +1,6 @@
+# Placeholder for electron-builder icon files
+# Add the following files for production builds:
+# - icon.icns (macOS)
+# - icon.ico (Windows)
+# - icons/ folder with PNGs (Linux: 16x16, 32x32, 64x64, 128x128, 256x256, 512x512)
+
