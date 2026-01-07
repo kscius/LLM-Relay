@@ -1,20 +1,8 @@
-/**
- * Health Scoring Module
- * 
- * Implements EWMA-based health scoring for providers.
- * Used by the router to make intelligent selection decisions.
- */
+// EWMA health scoring for providers
 
 import { providerRepo, type ProviderHealth } from '../database/repositories/index.js';
 
-// EWMA alpha for latency smoothing (0.2 = recent values weighted more)
 const LATENCY_ALPHA = 0.2;
-
-// Health score thresholds
-const HEALTH_EXCELLENT = 0.9;
-const HEALTH_GOOD = 0.7;
-const HEALTH_DEGRADED = 0.5;
-const HEALTH_POOR = 0.3;
 
 export type HealthStatus = 'excellent' | 'good' | 'degraded' | 'poor' | 'unavailable';
 
@@ -27,116 +15,67 @@ export interface HealthInfo {
   isAvailable: boolean;
 }
 
-/**
- * Calculate health score from provider metrics
- * 
- * Formula: successRate * (1 - latencyPenalty)
- * - successRate: ratio of successful requests
- * - latencyPenalty: capped at 50%, based on EWMA latency
- */
-export function calculateHealthScore(
-  successCount: number,
-  failureCount: number,
-  latencyEwmaMs: number
-): number {
-  const totalRequests = successCount + failureCount;
-  
-  // No requests yet = default healthy
-  if (totalRequests === 0) {
-    return 1.0;
-  }
+export function calculateHealthScore(success: number, fail: number, latencyMs: number): number {
+  const total = success + fail;
+  if (total === 0) return 1.0;
 
-  // Success rate
-  const successRate = successCount / totalRequests;
-
-  // Latency penalty (0-0.5, capped)
-  // Assume 5000ms is the worst acceptable latency
-  const latencyPenalty = Math.min(latencyEwmaMs / 10000, 0.5);
-
-  // Final score
-  const score = successRate * (1 - latencyPenalty);
-
-  return Math.max(0, Math.min(1, score));
+  const rate = success / total;
+  const penalty = Math.min(latencyMs / 10000, 0.5); // max 50% penalty
+  return Math.max(0, Math.min(1, rate * (1 - penalty)));
 }
 
-/**
- * Update latency using EWMA
- */
-export function updateLatencyEwma(currentEwma: number, newLatency: number): number {
-  return LATENCY_ALPHA * newLatency + (1 - LATENCY_ALPHA) * currentEwma;
+export function updateLatencyEwma(current: number, newVal: number): number {
+  return LATENCY_ALPHA * newVal + (1 - LATENCY_ALPHA) * current;
 }
 
-/**
- * Convert health score to status
- */
-export function scoreToStatus(score: number): HealthStatus {
-  if (score >= HEALTH_EXCELLENT) return 'excellent';
-  if (score >= HEALTH_GOOD) return 'good';
-  if (score >= HEALTH_DEGRADED) return 'degraded';
-  if (score >= HEALTH_POOR) return 'poor';
+export function scoreToStatus(s: number): HealthStatus {
+  if (s >= 0.9) return 'excellent';
+  if (s >= 0.7) return 'good';
+  if (s >= 0.5) return 'degraded';
+  if (s >= 0.3) return 'poor';
   return 'unavailable';
 }
 
-/**
- * Get health info for a provider
- */
-export function getProviderHealth(providerId: string): HealthInfo | null {
-  const health = providerRepo.getHealth(providerId);
-  if (!health) return null;
+export function getProviderHealth(pid: string): HealthInfo | null {
+  const h = providerRepo.getHealth(pid);
+  if (!h) return null;
 
-  const totalRequests = health.successCount + health.failureCount;
-  const successRate = totalRequests > 0 ? health.successCount / totalRequests : 1;
+  const total = h.successCount + h.failureCount;
+  const rate = total > 0 ? h.successCount / total : 1;
 
   return {
-    providerId,
-    score: health.healthScore,
-    status: scoreToStatus(health.healthScore),
-    latencyMs: health.latencyEwmaMs,
-    successRate,
-    isAvailable: health.circuitState !== 'open' && !isInCooldown(health),
+    providerId: pid,
+    score: h.healthScore,
+    status: scoreToStatus(h.healthScore),
+    latencyMs: h.latencyEwmaMs,
+    successRate: rate,
+    isAvailable: h.circuitState !== 'open' && !inCooldown(h),
   };
 }
 
-/**
- * Get health info for all providers
- */
 export function getAllProviderHealth(): HealthInfo[] {
-  const healthRecords = providerRepo.getAllHealth();
-  
-  return healthRecords.map(health => {
-    const totalRequests = health.successCount + health.failureCount;
-    const successRate = totalRequests > 0 ? health.successCount / totalRequests : 1;
-
+  return providerRepo.getAllHealth().map(h => {
+    const total = h.successCount + h.failureCount;
+    const rate = total > 0 ? h.successCount / total : 1;
     return {
-      providerId: health.providerId,
-      score: health.healthScore,
-      status: scoreToStatus(health.healthScore),
-      latencyMs: health.latencyEwmaMs,
-      successRate,
-      isAvailable: health.circuitState !== 'open' && !isInCooldown(health),
+      providerId: h.providerId,
+      score: h.healthScore,
+      status: scoreToStatus(h.healthScore),
+      latencyMs: h.latencyEwmaMs,
+      successRate: rate,
+      isAvailable: h.circuitState !== 'open' && !inCooldown(h),
     };
   });
 }
 
-/**
- * Check if a provider is in cooldown
- */
-function isInCooldown(health: ProviderHealth): boolean {
-  if (!health.cooldownUntil) return false;
-  return Date.now() < health.cooldownUntil;
+function inCooldown(h: ProviderHealth): boolean {
+  return h.cooldownUntil ? Date.now() < h.cooldownUntil : false;
 }
 
-/**
- * Record a successful request
- */
-export function recordSuccess(providerId: string, latencyMs: number): void {
-  providerRepo.updateHealth(providerId, true, latencyMs);
+export function recordSuccess(pid: string, latency: number): void {
+  providerRepo.updateHealth(pid, true, latency);
 }
 
-/**
- * Record a failed request
- */
-export function recordFailure(providerId: string, latencyMs: number, errorType?: string): void {
-  providerRepo.updateHealth(providerId, false, latencyMs, errorType);
+export function recordFailure(pid: string, latency: number, errType?: string): void {
+  providerRepo.updateHealth(pid, false, latency, errType);
 }
-

@@ -1,13 +1,4 @@
-/**
- * Main Router Module
- * 
- * Routes messages to available LLM providers with:
- * - Intelligent provider selection based on health
- * - Automatic fallback on failures
- * - Circuit breaker for failing providers
- * - Rate limit handling with cooldowns
- * - Event logging for debugging
- */
+// Routes messages to LLM providers with fallback, circuit breaker, rate limiting
 
 import { BrowserWindow } from 'electron';
 import { providerRegistry, type ProviderId, type GenerateRequest, type GenerateResponse, type StreamChunk, type NormalizedError } from '../providers/index.js';
@@ -18,10 +9,9 @@ import * as circuitBreaker from './circuit-breaker.js';
 import { contextWindowService } from '../services/context-window.service.js';
 import { memoryService } from '../services/memory.service.js';
 
-// Router configuration
 const MAX_ATTEMPTS = 6;
-const BASE_RETRY_DELAY_MS = 1000;
-const MAX_RETRY_DELAY_MS = 30000;
+const BASE_RETRY_MS = 1000;
+const MAX_RETRY_MS = 30000;
 
 export interface RouteResult {
   success: boolean;
@@ -43,313 +33,191 @@ export interface RouteOptions {
   onStream?: (chunk: StreamChunk) => void;
 }
 
-// Track recent providers per conversation for anti-repeat
+// anti-repeat tracking
 const recentProviders = new Map<string, ProviderId[]>();
 
-/**
- * Route a message to an available provider
- */
-export async function routeMessage(options: RouteOptions): Promise<RouteResult> {
-  const { conversationId, messages, userMessageId, signal, onStream } = options;
+export async function routeMessage(opts: RouteOptions): Promise<RouteResult> {
+  const { conversationId, messages, userMessageId, signal, onStream } = opts;
   
-  console.log('[router] Starting route for conversation:', conversationId);
+  console.log('router: starting', conversationId);
   
-  // Build context with memory (includes sliding window internally)
-  const contextMessages = await memoryService.buildContext(conversationId, messages);
-  const stats = contextWindowService.getStats(messages, contextMessages);
-  console.log('[router] Context with memory:', stats);
+  const contextMsgs = await memoryService.buildContext(conversationId, messages);
+  const stats = contextWindowService.getStats(messages, contextMsgs);
+  console.log('router: context', stats);
   
-  // Check if we should trigger background summarization (after this request)
-  const shouldSummarize = messages.length > contextWindowService.getMaxMessages() + 10;
-  if (shouldSummarize) {
-    // Trigger summarization in background (don't await)
-    memoryService.maybeSummarize(conversationId).catch(err => 
-      console.error('[router] Background summarization failed:', err)
-    );
+  // summarize in bg if conversation is getting long
+  if (messages.length > contextWindowService.getMaxMessages() + 10) {
+    memoryService.maybeSummarize(conversationId).catch(e => console.error('bg summarize failed:', e));
   }
   
-  const attemptedProviders: ProviderId[] = [];
+  const tried: ProviderId[] = [];
   const recent = recentProviders.get(conversationId) || [];
   
-  let lastError: NormalizedError | undefined;
+  let lastErr: NormalizedError | undefined;
   let attempt = 0;
 
   while (attempt < MAX_ATTEMPTS) {
     attempt++;
 
-    // Check for abort
     if (signal?.aborted) {
-      return {
-        success: false,
-        error: { type: 'unknown', message: 'Request cancelled' },
-        attemptsUsed: attempt,
-      };
+      return { success: false, error: { type: 'unknown', message: 'cancelled' }, attemptsUsed: attempt };
     }
 
-    // Get candidate pool excluding already attempted providers
-    const candidates = getCandidatePool({
-      excludeProviders: attemptedProviders,
-      recentProviders: recent,
-    });
+    const candidates = getCandidatePool({ excludeProviders: tried, recentProviders: recent });
+    console.log('router: attempt', attempt, '- candidates:', candidates.length, candidates.map(c => c.id));
 
-    console.log('[router] Attempt', attempt, '- Candidates available:', candidates.length, candidates.map(c => c.id));
-
-    if (candidates.length === 0) {
-      // No more providers to try
+    if (!candidates.length) {
       routerEventsRepo.log({
-        conversationId,
-        messageId: userMessageId,
-        eventType: 'exhaust',
-        attemptNumber: attempt,
-        errorType: lastError?.type,
-        errorMessage: lastError?.message,
+        conversationId, messageId: userMessageId, eventType: 'exhaust',
+        attemptNumber: attempt, errorType: lastErr?.type, errorMessage: lastErr?.message,
       });
-
-      return {
-        success: false,
-        error: lastError || { type: 'unknown', message: 'All providers exhausted' },
-        attemptsUsed: attempt,
-      };
+      return { success: false, error: lastErr || { type: 'unknown', message: 'no providers left' }, attemptsUsed: attempt };
     }
 
-    // Select a provider
     const candidate = selectProvider(candidates);
-    if (!candidate) {
-      continue;
-    }
+    if (!candidate) continue;
 
-    const providerId = candidate.id;
-    attemptedProviders.push(providerId);
+    const pid = candidate.id;
+    tried.push(pid);
+    console.log('router: selected', pid);
 
-    console.log('[router] Selected provider:', providerId);
+    routerEventsRepo.log({ conversationId, messageId: userMessageId, eventType: 'attempt', providerId: pid, attemptNumber: attempt });
 
-    // Log attempt
-    routerEventsRepo.log({
-      conversationId,
-      messageId: userMessageId,
-      eventType: 'attempt',
-      providerId,
-      attemptNumber: attempt,
-    });
+    const adapter = providerRegistry.get(pid);
+    const apiKey = providerRepo.getKey(pid);
 
-    // Get the adapter and API key
-    const adapter = providerRegistry.get(providerId);
-    const apiKey = providerRepo.getKey(providerId);
-
-    console.log('[router] Provider', providerId, '- adapter:', !!adapter, 'hasKey:', !!apiKey);
+    console.log('router:', pid, '- adapter:', !!adapter, 'key:', !!apiKey);
 
     if (!adapter || !apiKey) {
-      console.warn('[router] Skipping', providerId, '- missing adapter or key');
+      console.warn('router: skip', pid, '- missing adapter/key');
       continue;
     }
 
-    const startTime = Date.now();
+    const t0 = Date.now();
 
     try {
-      // Call the provider
-      const request: GenerateRequest = { messages: contextMessages };
-      const generator = adapter.generate(request, apiKey, signal);
+      const req: GenerateRequest = { messages: contextMsgs };
+      const gen = adapter.generate(req, apiKey, signal);
       
-      let fullContent = '';
-      let finalResponse: GenerateResponse | undefined;
-      let receivedDone = false;
+      let content = '';
+      let gotDone = false;
 
-      for await (const chunk of generator) {
-        if (signal?.aborted) {
-          throw new Error('Request cancelled');
-        }
+      for await (const chunk of gen) {
+        if (signal?.aborted) throw new Error('cancelled');
 
         if (chunk.type === 'delta' && chunk.delta) {
-          fullContent += chunk.delta;
+          content += chunk.delta;
           onStream?.(chunk);
         } else if (chunk.type === 'error') {
           throw chunk.error;
         } else if (chunk.type === 'done') {
-          receivedDone = true;
+          gotDone = true;
           onStream?.(chunk);
         }
       }
 
-      // Get the final response from the generator return value
-      const latencyMs = Date.now() - startTime;
-      finalResponse = {
-        content: fullContent,
+      const latency = Date.now() - t0;
+      const response: GenerateResponse = {
+        content,
         model: adapter.capabilities.defaultModel,
         usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
         finishReason: 'stop',
-        latencyMs,
+        latencyMs: latency,
       };
 
-      // Always send done event if not already sent
-      if (!receivedDone) {
-        onStream?.({ 
-          type: 'done', 
-          usage: finalResponse.usage, 
-          model: finalResponse.model, 
-          finishReason: 'stop' 
-        });
+      if (!gotDone) {
+        onStream?.({ type: 'done', usage: response.usage, model: response.model, finishReason: 'stop' });
       }
 
-      // Record success
-      health.recordSuccess(providerId, finalResponse.latencyMs);
-      circuitBreaker.recordSuccess(providerId);
+      health.recordSuccess(pid, latency);
+      circuitBreaker.recordSuccess(pid);
+      updateRecent(conversationId, pid);
 
-      // Update recent providers
-      updateRecentProviders(conversationId, providerId);
-
-      // Log success
       routerEventsRepo.log({
-        conversationId,
-        messageId: userMessageId,
-        eventType: 'success',
-        providerId,
-        attemptNumber: attempt,
-        latencyMs: finalResponse.latencyMs,
+        conversationId, messageId: userMessageId, eventType: 'success',
+        providerId: pid, attemptNumber: attempt, latencyMs: latency,
       });
 
       return {
-        success: true,
-        content: finalResponse.content,
-        providerId,
-        model: finalResponse.model,
-        tokens: finalResponse.usage.totalTokens,
-        latencyMs: finalResponse.latencyMs,
-        attemptsUsed: attempt,
+        success: true, content, providerId: pid, model: response.model,
+        tokens: response.usage.totalTokens, latencyMs: latency, attemptsUsed: attempt,
       };
 
-    } catch (error) {
-      const latencyMs = Date.now() - startTime;
+    } catch (err) {
+      const latency = Date.now() - t0;
+      console.error('router:', pid, 'error:', err);
       
-      console.error('[router] Provider', providerId, 'error:', error);
-      
-      // Normalize the error
-      const normalizedError = adapter.normalizeError(error);
-      lastError = normalizedError;
-      
-      console.error('[router] Normalized error:', normalizedError);
+      const normErr = adapter.normalizeError(err);
+      lastErr = normErr;
+      console.error('router: normalized:', normErr);
 
-      // Record failure
-      health.recordFailure(providerId, latencyMs, normalizedError.type);
-      circuitBreaker.recordFailure(providerId);
+      health.recordFailure(pid, latency, normErr.type);
+      circuitBreaker.recordFailure(pid);
 
-      // Handle rate limit
-      if (normalizedError.type === 'rate_limit') {
-        circuitBreaker.applyRateLimitCooldown(providerId, normalizedError.retryAfterMs);
+      if (normErr.type === 'rate_limit') {
+        circuitBreaker.applyRateLimitCooldown(pid, normErr.retryAfterMs);
       }
 
-      // Log failure
       routerEventsRepo.log({
-        conversationId,
-        messageId: userMessageId,
-        eventType: 'failure',
-        providerId,
-        attemptNumber: attempt,
-        latencyMs,
-        errorType: normalizedError.type,
-        errorMessage: normalizedError.message,
+        conversationId, messageId: userMessageId, eventType: 'failure',
+        providerId: pid, attemptNumber: attempt, latencyMs: latency,
+        errorType: normErr.type, errorMessage: normErr.message,
       });
 
-      // Log fallback
       routerEventsRepo.log({
-        conversationId,
-        messageId: userMessageId,
-        eventType: 'fallback',
-        providerId,
-        attemptNumber: attempt,
+        conversationId, messageId: userMessageId, eventType: 'fallback',
+        providerId: pid, attemptNumber: attempt,
       });
 
-      // Exponential backoff before retry
-      const delay = Math.min(
-        BASE_RETRY_DELAY_MS * Math.pow(2, attempt - 1),
-        MAX_RETRY_DELAY_MS
-      );
+      const delay = Math.min(BASE_RETRY_MS * Math.pow(2, attempt - 1), MAX_RETRY_MS);
       await sleep(delay);
     }
   }
 
-  return {
-    success: false,
-    error: lastError || { type: 'unknown', message: 'Max attempts reached' },
-    attemptsUsed: attempt,
-  };
+  return { success: false, error: lastErr || { type: 'unknown', message: 'max attempts' }, attemptsUsed: attempt };
 }
 
-/**
- * Route a message and save to database
- */
-export async function routeAndSaveMessage(options: RouteOptions & { window: BrowserWindow }): Promise<RouteResult> {
-  const { conversationId, window } = options;
+export async function routeAndSaveMessage(opts: RouteOptions & { window: BrowserWindow }): Promise<RouteResult> {
+  const { conversationId, window } = opts;
   
-  // Create placeholder assistant message
-  const assistantMessage = messageRepo.create({
-    conversationId,
-    role: 'assistant',
-    content: '',
-  });
+  const msg = messageRepo.create({ conversationId, role: 'assistant', content: '' });
 
-  // Stream handler that updates the UI
   const handleStream = (chunk: StreamChunk) => {
     window.webContents.send(`chat:stream:${conversationId}`, chunk);
   };
 
-  // Route the message
-  const result = await routeMessage({
-    ...options,
-    onStream: handleStream,
-  });
+  const result = await routeMessage({ ...opts, onStream: handleStream });
 
   if (result.success && result.content) {
-    // Update the assistant message with final content
-    messageRepo.updateMetadata(assistantMessage.id, {
+    messageRepo.updateMetadata(msg.id, {
       content: result.content,
       providerId: result.providerId,
       model: result.model,
       tokens: result.tokens,
       latencyMs: result.latencyMs,
     });
-
-    return {
-      ...result,
-      messageId: assistantMessage.id,
-    };
+    return { ...result, messageId: msg.id };
   } else {
-    // Delete the placeholder message on failure
-    messageRepo.delete(assistantMessage.id);
+    messageRepo.delete(msg.id);
     return result;
   }
 }
 
-/**
- * Update recent providers for anti-repeat
- */
-function updateRecentProviders(conversationId: string, providerId: ProviderId): void {
-  const recent = recentProviders.get(conversationId) || [];
-  recent.push(providerId);
-  
-  // Keep only last N providers
-  if (recent.length > 10) {
-    recent.shift();
-  }
-  
-  recentProviders.set(conversationId, recent);
+function updateRecent(convId: string, pid: ProviderId): void {
+  const recent = recentProviders.get(convId) || [];
+  recent.push(pid);
+  if (recent.length > 10) recent.shift();
+  recentProviders.set(convId, recent);
 }
 
-/**
- * Sleep helper
- */
 function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise(r => setTimeout(r, ms));
 }
 
-/**
- * Clear recent providers for a conversation
- */
-export function clearRecentProviders(conversationId: string): void {
-  recentProviders.delete(conversationId);
+export function clearRecentProviders(convId: string): void {
+  recentProviders.delete(convId);
 }
 
-// Export sub-modules for direct access
 export { getCandidatePool, selectProvider, hasAvailableProviders, getPoolSummary } from './candidate-pool.js';
 export * as health from './health.js';
 export * as circuitBreaker from './circuit-breaker.js';
-

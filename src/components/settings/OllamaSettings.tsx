@@ -59,7 +59,7 @@ export default function OllamaSettings() {
           error: 'Ollama server returned an error',
         });
       }
-    } catch (error) {
+    } catch {
       setStatus({
         available: false,
         models: [],

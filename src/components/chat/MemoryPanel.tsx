@@ -147,7 +147,7 @@ export default function MemoryPanel({ conversationId, isOpen, onClose }: MemoryP
                   </div>
                 ) : (
                   <p className="text-surface-500 text-sm italic">
-                    No summary yet. Click "Generate Summary" to create one based on the conversation history.
+                    No summary yet. Click &quot;Generate Summary&quot; to create one based on the conversation history.
                   </p>
                 )}
               </section>

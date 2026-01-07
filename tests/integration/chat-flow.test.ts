@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 
 /**
  * Integration tests for the chat flow
@@ -16,12 +16,6 @@ describe('Chat Flow Integration', () => {
     delta?: string;
     error?: { type: string; message: string };
     model?: string;
-  }
-
-  interface GenerateResponse {
-    content: string;
-    model: string;
-    latencyMs: number;
   }
 
   interface CandidateProvider {
@@ -368,7 +362,6 @@ describe('Chat Flow Integration', () => {
   describe('abort handling', () => {
     it('should respect abort signal during streaming', async () => {
       const controller = new AbortController();
-      let chunksReceived = 0;
 
       const simulateStream = async function* (
         signal: AbortSignal
@@ -378,7 +371,6 @@ describe('Chat Flow Integration', () => {
             return;
           }
           yield { type: 'delta', delta: `Chunk ${i}` };
-          chunksReceived++;
           await new Promise(resolve => setTimeout(resolve, 10));
         }
       };

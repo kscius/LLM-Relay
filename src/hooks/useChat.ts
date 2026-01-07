@@ -80,7 +80,7 @@ export function useChat(conversationId: string | null) {
         setCurrentConversation(activeConversationId);
         // Signal to parent to update URL/state
         window.dispatchEvent(new CustomEvent('conversation-created', { detail: newConv }));
-      } catch (e) {
+      } catch {
         setError('Failed to create conversation');
         return;
       }

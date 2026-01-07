@@ -1,383 +1,191 @@
+// Provider management - keys, health, circuit breaker
+
 import { safeStorage } from 'electron';
 import { query, queryOne, execute, saveDatabase } from '../sqlite.js';
 
-/**
- * Encrypt a string using Electron's safeStorage
- * Falls back to base64 if encryption is not available (dev mode)
- */
-function encryptKey(plaintext: string): string {
+function encryptKey(plain: string): string {
   if (safeStorage.isEncryptionAvailable()) {
-    const encrypted = safeStorage.encryptString(plaintext);
-    return encrypted.toString('base64');
+    return safeStorage.encryptString(plain).toString('base64');
   }
-  // Fallback: base64 encoding (not secure, for dev only)
-  console.warn('[provider.repo] safeStorage not available, using base64 fallback');
-  return 'b64:' + Buffer.from(plaintext).toString('base64');
+  console.warn('provider: safeStorage unavailable, using b64 fallback');
+  return 'b64:' + Buffer.from(plain).toString('base64');
 }
 
-/**
- * Decrypt a string using Electron's safeStorage
- * Falls back to base64 if encryption was not used
- */
-function decryptKey(encrypted: string): string {
-  if (encrypted.startsWith('b64:')) {
-    // Base64 fallback format
-    return Buffer.from(encrypted.slice(4), 'base64').toString('utf-8');
+function decryptKey(enc: string): string {
+  if (enc.startsWith('b64:')) {
+    return Buffer.from(enc.slice(4), 'base64').toString('utf-8');
   }
-  
   if (safeStorage.isEncryptionAvailable()) {
     try {
-      const buffer = Buffer.from(encrypted, 'base64');
-      return safeStorage.decryptString(buffer);
-    } catch (error) {
-      // May be old base64-only key, try fallback
-      console.warn('[provider.repo] Failed to decrypt with safeStorage, trying base64 fallback');
-      return Buffer.from(encrypted, 'base64').toString('utf-8');
+      return safeStorage.decryptString(Buffer.from(enc, 'base64'));
+    } catch {
+      console.warn('provider: decrypt failed, trying b64');
+      return Buffer.from(enc, 'base64').toString('utf-8');
     }
   }
-  
-  // Fallback: try base64 decoding
-  return Buffer.from(encrypted, 'base64').toString('utf-8');
+  return Buffer.from(enc, 'base64').toString('utf-8');
 }
 
 export interface ProviderRow {
-  id: string;
-  display_name: string;
-  description: string | null;
-  is_enabled: number;
-  priority: number;
-  created_at: string;
-  updated_at: string;
+  id: string; display_name: string; description: string | null;
+  is_enabled: number; priority: number; created_at: string; updated_at: string;
 }
 
 export interface ProviderHealthRow {
-  provider_id: string;
-  health_score: number;
-  latency_ewma_ms: number;
-  success_count: number;
-  failure_count: number;
-  last_success_at: string | null;
-  last_failure_at: string | null;
-  last_error_type: string | null;
+  provider_id: string; health_score: number; latency_ewma_ms: number;
+  success_count: number; failure_count: number;
+  last_success_at: string | null; last_failure_at: string | null; last_error_type: string | null;
   circuit_state: 'closed' | 'open' | 'half_open';
-  circuit_opened_at: string | null;
-  cooldown_until: string | null;
-  updated_at: string;
+  circuit_opened_at: string | null; cooldown_until: string | null; updated_at: string;
 }
 
 export interface Provider {
-  id: string;
-  displayName: string;
-  description: string;
-  isEnabled: boolean;
-  priority: number;
-  hasKey: boolean;
-  keyHint?: string;
+  id: string; displayName: string; description: string;
+  isEnabled: boolean; priority: number; hasKey: boolean; keyHint?: string;
 }
 
 export interface ProviderHealth {
-  providerId: string;
-  healthScore: number;
-  latencyEwmaMs: number;
-  successCount: number;
-  failureCount: number;
-  lastSuccessAt?: number;
-  lastFailureAt?: number;
-  lastErrorType?: string;
+  providerId: string; healthScore: number; latencyEwmaMs: number;
+  successCount: number; failureCount: number;
+  lastSuccessAt?: number; lastFailureAt?: number; lastErrorType?: string;
   circuitState: 'closed' | 'open' | 'half_open';
-  circuitOpenedAt?: number;
-  cooldownUntil?: number;
+  circuitOpenedAt?: number; cooldownUntil?: number;
 }
 
 export const providerRepo = {
-  /**
-   * List all providers with their key status
-   */
   list(): Provider[] {
-    console.log('[providerRepo.list] Querying providers...');
+    console.log('provider: list');
     const rows = query<ProviderRow & { has_key: number; key_hint: string | null }>(
-      `SELECT 
-        p.*,
-        pk.key_hint,
-        CASE WHEN pk.api_key_encrypted IS NOT NULL THEN 1 ELSE 0 END as has_key
-      FROM providers p
-      LEFT JOIN provider_keys pk ON p.id = pk.provider_id
-      ORDER BY p.priority DESC, p.display_name ASC`
+      `SELECT p.*, pk.key_hint, CASE WHEN pk.api_key_encrypted IS NOT NULL THEN 1 ELSE 0 END as has_key
+       FROM providers p LEFT JOIN provider_keys pk ON p.id = pk.provider_id
+       ORDER BY p.priority DESC, p.display_name ASC`
     );
-    console.log('[providerRepo.list] Raw rows:', rows);
-
-    return rows.map(row => ({
-      id: row.id,
-      displayName: row.display_name,
-      description: row.description ?? '',
-      isEnabled: row.is_enabled === 1,
-      priority: row.priority,
-      hasKey: row.has_key === 1,
-      keyHint: row.key_hint ?? undefined,
+    console.log('provider: found', rows.length);
+    return rows.map(r => ({
+      id: r.id, displayName: r.display_name, description: r.description ?? '',
+      isEnabled: r.is_enabled === 1, priority: r.priority,
+      hasKey: r.has_key === 1, keyHint: r.key_hint ?? undefined,
     }));
   },
 
-  /**
-   * Get a single provider
-   */
   get(id: string): Provider | null {
-    const row = queryOne<ProviderRow & { has_key: number; key_hint: string | null }>(
-      `SELECT 
-        p.*,
-        pk.key_hint,
-        CASE WHEN pk.api_key_encrypted IS NOT NULL THEN 1 ELSE 0 END as has_key
-      FROM providers p
-      LEFT JOIN provider_keys pk ON p.id = pk.provider_id
-      WHERE p.id = ?`,
-      [id]
+    const r = queryOne<ProviderRow & { has_key: number; key_hint: string | null }>(
+      `SELECT p.*, pk.key_hint, CASE WHEN pk.api_key_encrypted IS NOT NULL THEN 1 ELSE 0 END as has_key
+       FROM providers p LEFT JOIN provider_keys pk ON p.id = pk.provider_id WHERE p.id = ?`, [id]
     );
-
-    if (!row) return null;
-
+    if (!r) return null;
     return {
-      id: row.id,
-      displayName: row.display_name,
-      description: row.description ?? '',
-      isEnabled: row.is_enabled === 1,
-      priority: row.priority,
-      hasKey: row.has_key === 1,
-      keyHint: row.key_hint ?? undefined,
+      id: r.id, displayName: r.display_name, description: r.description ?? '',
+      isEnabled: r.is_enabled === 1, priority: r.priority,
+      hasKey: r.has_key === 1, keyHint: r.key_hint ?? undefined,
     };
   },
 
-  /**
-   * Update provider settings
-   */
   update(id: string, updates: { isEnabled?: boolean; priority?: number }): boolean {
-    const fields: string[] = ["updated_at = datetime('now')"];
-    const values: (string | number)[] = [];
-
-    if (updates.isEnabled !== undefined) {
-      fields.push('is_enabled = ?');
-      values.push(updates.isEnabled ? 1 : 0);
-    }
-
-    if (updates.priority !== undefined) {
-      fields.push('priority = ?');
-      values.push(updates.priority);
-    }
-
-    values.push(id);
-    const result = execute(`UPDATE providers SET ${fields.join(', ')} WHERE id = ?`, values);
+    const f: string[] = ["updated_at = datetime('now')"];
+    const v: (string | number)[] = [];
+    if (updates.isEnabled !== undefined) { f.push('is_enabled = ?'); v.push(updates.isEnabled ? 1 : 0); }
+    if (updates.priority !== undefined) { f.push('priority = ?'); v.push(updates.priority); }
+    v.push(id);
+    const r = execute(`UPDATE providers SET ${f.join(', ')} WHERE id = ?`, v);
     saveDatabase();
-    return result.changes > 0;
+    return r.changes > 0;
   },
 
-  /**
-   * Save an API key for a provider
-   * Uses Electron's safeStorage for secure encryption
-   */
-  saveKey(providerId: string, apiKey: string): boolean {
-    const encrypted = encryptKey(apiKey);
-    const hint = apiKey.slice(-4);
-
-    const existing = queryOne<{ provider_id: string }>(
-      'SELECT provider_id FROM provider_keys WHERE provider_id = ?',
-      [providerId]
-    );
-
-    if (existing) {
-      execute(
-        "UPDATE provider_keys SET api_key_encrypted = ?, key_hint = ?, updated_at = datetime('now') WHERE provider_id = ?",
-        [encrypted, hint, providerId]
-      );
+  saveKey(pid: string, key: string): boolean {
+    const enc = encryptKey(key);
+    const hint = key.slice(-4);
+    const exists = queryOne<{ provider_id: string }>('SELECT provider_id FROM provider_keys WHERE provider_id = ?', [pid]);
+    if (exists) {
+      execute("UPDATE provider_keys SET api_key_encrypted = ?, key_hint = ?, updated_at = datetime('now') WHERE provider_id = ?", [enc, hint, pid]);
     } else {
-      execute(
-        'INSERT INTO provider_keys (provider_id, api_key_encrypted, key_hint) VALUES (?, ?, ?)',
-        [providerId, encrypted, hint]
-      );
+      execute('INSERT INTO provider_keys (provider_id, api_key_encrypted, key_hint) VALUES (?, ?, ?)', [pid, enc, hint]);
     }
     saveDatabase();
-
-    console.log(`[provider.repo] Saved encrypted key for ${providerId} (encryption: ${safeStorage.isEncryptionAvailable()})`);
+    console.log(`provider: saved key for ${pid} (safe: ${safeStorage.isEncryptionAvailable()})`);
     return true;
   },
 
-  /**
-   * Get a decrypted API key
-   * Uses Electron's safeStorage for secure decryption
-   */
-  getKey(providerId: string): string | null {
-    const row = queryOne<{ api_key_encrypted: string }>(
-      'SELECT api_key_encrypted FROM provider_keys WHERE provider_id = ?',
-      [providerId]
-    );
-
-    if (!row) return null;
-
-    return decryptKey(row.api_key_encrypted);
+  getKey(pid: string): string | null {
+    const r = queryOne<{ api_key_encrypted: string }>('SELECT api_key_encrypted FROM provider_keys WHERE provider_id = ?', [pid]);
+    return r ? decryptKey(r.api_key_encrypted) : null;
   },
 
-  /**
-   * Remove an API key
-   */
-  removeKey(providerId: string): boolean {
-    const result = execute('DELETE FROM provider_keys WHERE provider_id = ?', [providerId]);
+  removeKey(pid: string): boolean {
+    const r = execute('DELETE FROM provider_keys WHERE provider_id = ?', [pid]);
     saveDatabase();
-    return result.changes > 0;
+    return r.changes > 0;
   },
 
-  /**
-   * Get health status for a provider
-   */
-  getHealth(providerId: string): ProviderHealth | null {
-    const row = queryOne<ProviderHealthRow>(
-      'SELECT * FROM provider_health WHERE provider_id = ?',
-      [providerId]
-    );
-
-    if (!row) return null;
-
+  getHealth(pid: string): ProviderHealth | null {
+    const r = queryOne<ProviderHealthRow>('SELECT * FROM provider_health WHERE provider_id = ?', [pid]);
+    if (!r) return null;
     return {
-      providerId: row.provider_id,
-      healthScore: row.health_score,
-      latencyEwmaMs: row.latency_ewma_ms,
-      successCount: row.success_count,
-      failureCount: row.failure_count,
-      lastSuccessAt: row.last_success_at ? new Date(row.last_success_at).getTime() : undefined,
-      lastFailureAt: row.last_failure_at ? new Date(row.last_failure_at).getTime() : undefined,
-      lastErrorType: row.last_error_type ?? undefined,
-      circuitState: row.circuit_state,
-      circuitOpenedAt: row.circuit_opened_at ? new Date(row.circuit_opened_at).getTime() : undefined,
-      cooldownUntil: row.cooldown_until ? new Date(row.cooldown_until).getTime() : undefined,
+      providerId: r.provider_id, healthScore: r.health_score, latencyEwmaMs: r.latency_ewma_ms,
+      successCount: r.success_count, failureCount: r.failure_count,
+      lastSuccessAt: r.last_success_at ? new Date(r.last_success_at).getTime() : undefined,
+      lastFailureAt: r.last_failure_at ? new Date(r.last_failure_at).getTime() : undefined,
+      lastErrorType: r.last_error_type ?? undefined, circuitState: r.circuit_state,
+      circuitOpenedAt: r.circuit_opened_at ? new Date(r.circuit_opened_at).getTime() : undefined,
+      cooldownUntil: r.cooldown_until ? new Date(r.cooldown_until).getTime() : undefined,
     };
   },
 
-  /**
-   * Get health for all providers
-   */
   getAllHealth(): ProviderHealth[] {
-    const rows = query<ProviderHealthRow>('SELECT * FROM provider_health');
-
-    return rows.map(row => ({
-      providerId: row.provider_id,
-      healthScore: row.health_score,
-      latencyEwmaMs: row.latency_ewma_ms,
-      successCount: row.success_count,
-      failureCount: row.failure_count,
-      lastSuccessAt: row.last_success_at ? new Date(row.last_success_at).getTime() : undefined,
-      lastFailureAt: row.last_failure_at ? new Date(row.last_failure_at).getTime() : undefined,
-      lastErrorType: row.last_error_type ?? undefined,
-      circuitState: row.circuit_state,
-      circuitOpenedAt: row.circuit_opened_at ? new Date(row.circuit_opened_at).getTime() : undefined,
-      cooldownUntil: row.cooldown_until ? new Date(row.cooldown_until).getTime() : undefined,
+    return query<ProviderHealthRow>('SELECT * FROM provider_health').map(r => ({
+      providerId: r.provider_id, healthScore: r.health_score, latencyEwmaMs: r.latency_ewma_ms,
+      successCount: r.success_count, failureCount: r.failure_count,
+      lastSuccessAt: r.last_success_at ? new Date(r.last_success_at).getTime() : undefined,
+      lastFailureAt: r.last_failure_at ? new Date(r.last_failure_at).getTime() : undefined,
+      lastErrorType: r.last_error_type ?? undefined, circuitState: r.circuit_state,
+      circuitOpenedAt: r.circuit_opened_at ? new Date(r.circuit_opened_at).getTime() : undefined,
+      cooldownUntil: r.cooldown_until ? new Date(r.cooldown_until).getTime() : undefined,
     }));
   },
 
-  /**
-   * Update health metrics after a request
-   */
-  updateHealth(
-    providerId: string,
-    success: boolean,
-    latencyMs: number,
-    errorType?: string
-  ): void {
-    const current = this.getHealth(providerId);
-    if (!current) return;
+  updateHealth(pid: string, success: boolean, latencyMs: number, errType?: string): void {
+    const cur = this.getHealth(pid);
+    if (!cur) return;
 
-    // Calculate EWMA for latency (alpha = 0.2)
     const alpha = 0.2;
-    const newLatencyEwma = alpha * latencyMs + (1 - alpha) * current.latencyEwmaMs;
-
-    // Update counters
-    const successCount = success ? current.successCount + 1 : current.successCount;
-    const failureCount = success ? current.failureCount : current.failureCount + 1;
-
-    // Calculate health score based on success rate and latency
-    const totalRequests = successCount + failureCount;
-    const successRate = totalRequests > 0 ? successCount / totalRequests : 1;
-    const latencyPenalty = Math.min(newLatencyEwma / 5000, 0.5); // Cap at 50% penalty
-    const healthScore = Math.max(0, successRate * (1 - latencyPenalty));
-
-    // Update timestamps
+    const ewma = alpha * latencyMs + (1 - alpha) * cur.latencyEwmaMs;
+    const successCnt = success ? cur.successCount + 1 : cur.successCount;
+    const failCnt = success ? cur.failureCount : cur.failureCount + 1;
+    const total = successCnt + failCnt;
+    const rate = total > 0 ? successCnt / total : 1;
+    const penalty = Math.min(ewma / 5000, 0.5);
+    const score = Math.max(0, rate * (1 - penalty));
     const now = new Date().toISOString();
 
     if (success) {
-      execute(
-        `UPDATE provider_health SET
-          health_score = ?,
-          latency_ewma_ms = ?,
-          success_count = ?,
-          last_success_at = ?,
-          updated_at = ?
-        WHERE provider_id = ?`,
-        [healthScore, newLatencyEwma, successCount, now, now, providerId]
-      );
+      execute('UPDATE provider_health SET health_score = ?, latency_ewma_ms = ?, success_count = ?, last_success_at = ?, updated_at = ? WHERE provider_id = ?',
+        [score, ewma, successCnt, now, now, pid]);
     } else {
-      execute(
-        `UPDATE provider_health SET
-          health_score = ?,
-          latency_ewma_ms = ?,
-          failure_count = ?,
-          last_failure_at = ?,
-          last_error_type = ?,
-          updated_at = ?
-        WHERE provider_id = ?`,
-        [healthScore, newLatencyEwma, failureCount, now, errorType ?? null, now, providerId]
-      );
+      execute('UPDATE provider_health SET health_score = ?, latency_ewma_ms = ?, failure_count = ?, last_failure_at = ?, last_error_type = ?, updated_at = ? WHERE provider_id = ?',
+        [score, ewma, failCnt, now, errType ?? null, now, pid]);
     }
     saveDatabase();
   },
 
-  /**
-   * Update circuit breaker state
-   */
-  updateCircuitState(
-    providerId: string,
-    state: 'closed' | 'open' | 'half_open',
-    cooldownUntil?: Date
-  ): void {
+  updateCircuitState(pid: string, state: 'closed' | 'open' | 'half_open', cooldown?: Date): void {
     const now = new Date().toISOString();
-
     if (state === 'open') {
-      execute(
-        `UPDATE provider_health SET
-          circuit_state = ?,
-          circuit_opened_at = ?,
-          cooldown_until = ?,
-          updated_at = ?
-        WHERE provider_id = ?`,
-        [state, now, cooldownUntil?.toISOString() ?? null, now, providerId]
-      );
+      execute('UPDATE provider_health SET circuit_state = ?, circuit_opened_at = ?, cooldown_until = ?, updated_at = ? WHERE provider_id = ?',
+        [state, now, cooldown?.toISOString() ?? null, now, pid]);
     } else {
-      execute(
-        `UPDATE provider_health SET
-          circuit_state = ?,
-          circuit_opened_at = NULL,
-          cooldown_until = NULL,
-          updated_at = ?
-        WHERE provider_id = ?`,
-        [state, now, providerId]
-      );
+      execute('UPDATE provider_health SET circuit_state = ?, circuit_opened_at = NULL, cooldown_until = NULL, updated_at = ? WHERE provider_id = ?',
+        [state, now, pid]);
     }
     saveDatabase();
   },
 
-  /**
-   * Set cooldown for a provider (e.g., after 429)
-   */
-  setCooldown(providerId: string, cooldownUntil: Date): void {
-    execute(
-      "UPDATE provider_health SET cooldown_until = ?, updated_at = datetime('now') WHERE provider_id = ?",
-      [cooldownUntil.toISOString(), providerId]
-    );
+  setCooldown(pid: string, until: Date): void {
+    execute("UPDATE provider_health SET cooldown_until = ?, updated_at = datetime('now') WHERE provider_id = ?", [until.toISOString(), pid]);
     saveDatabase();
   },
 
-  /**
-   * Clear cooldown for a provider
-   */
-  clearCooldown(providerId: string): void {
-    execute(
-      "UPDATE provider_health SET cooldown_until = NULL, updated_at = datetime('now') WHERE provider_id = ?",
-      [providerId]
-    );
+  clearCooldown(pid: string): void {
+    execute("UPDATE provider_health SET cooldown_until = NULL, updated_at = datetime('now') WHERE provider_id = ?", [pid]);
     saveDatabase();
   },
 };

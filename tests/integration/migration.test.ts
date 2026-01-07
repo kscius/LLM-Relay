@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 
 /**
  * Integration tests for database migrations
@@ -187,10 +187,6 @@ describe('Database Migrations', () => {
 
   describe('rollback simulation', () => {
     // Note: SQLite doesn't support all rollback features, but we test the concept
-    interface TableState {
-      exists: boolean;
-      rowCount: number;
-    }
 
     it('should support transaction rollback on failure', () => {
       let tableCreated = false;

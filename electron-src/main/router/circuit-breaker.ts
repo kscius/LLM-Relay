@@ -1,19 +1,11 @@
-/**
- * Circuit Breaker Module
- * 
- * Implements the circuit breaker pattern for providers:
- * - CLOSED: Normal operation, requests flow through
- * - OPEN: Provider is failing, block all requests
- * - HALF_OPEN: Testing if provider has recovered
- */
+// Circuit breaker: closed -> open -> half_open
 
 import { providerRepo } from '../database/repositories/index.js';
 
-// Circuit breaker configuration
-const FAILURE_THRESHOLD = 3; // Consecutive failures to open
-const COOLDOWN_BASE_MS = 2 * 60 * 1000; // 2 minutes base cooldown
-const COOLDOWN_MAX_MS = 10 * 60 * 1000; // 10 minutes max cooldown
-const COOLDOWN_MULTIPLIER = 1.5; // Exponential backoff multiplier
+const FAIL_THRESHOLD = 3;
+const COOLDOWN_BASE = 2 * 60 * 1000; // 2min
+const COOLDOWN_MAX = 10 * 60 * 1000; // 10min
+const COOLDOWN_MULT = 1.5;
 
 export type CircuitState = 'closed' | 'open' | 'half_open';
 
@@ -25,137 +17,75 @@ export interface CircuitBreakerState {
   canAttempt: boolean;
 }
 
-// In-memory tracking of consecutive failures (not persisted)
-const consecutiveFailures = new Map<string, number>();
+const failures = new Map<string, number>();
 
-/**
- * Get the current state of a provider's circuit breaker
- */
-export function getCircuitState(providerId: string): CircuitBreakerState {
-  const health = providerRepo.getHealth(providerId);
-  if (!health) {
-    return {
-      providerId,
-      state: 'closed',
-      consecutiveFailures: 0,
-      canAttempt: false, // No health record means provider doesn't exist
-    };
-  }
+export function getCircuitState(pid: string): CircuitBreakerState {
+  const h = providerRepo.getHealth(pid);
+  if (!h) return { providerId: pid, state: 'closed', consecutiveFailures: 0, canAttempt: false };
 
-  const failures = consecutiveFailures.get(providerId) || 0;
+  const fails = failures.get(pid) || 0;
   const now = Date.now();
 
-  // Check if cooldown has expired
-  if (health.circuitState === 'open' && health.cooldownUntil) {
-    if (now >= health.cooldownUntil) {
-      // Transition to half-open
-      providerRepo.updateCircuitState(providerId, 'half_open');
-      return {
-        providerId,
-        state: 'half_open',
-        consecutiveFailures: failures,
-        cooldownUntil: health.cooldownUntil,
-        canAttempt: true,
-      };
-    }
+  // expired cooldown -> half_open
+  if (h.circuitState === 'open' && h.cooldownUntil && now >= h.cooldownUntil) {
+    providerRepo.updateCircuitState(pid, 'half_open');
+    return { providerId: pid, state: 'half_open', consecutiveFailures: fails, cooldownUntil: h.cooldownUntil, canAttempt: true };
   }
 
   return {
-    providerId,
-    state: health.circuitState,
-    consecutiveFailures: failures,
-    cooldownUntil: health.cooldownUntil,
-    canAttempt: health.circuitState !== 'open',
+    providerId: pid,
+    state: h.circuitState,
+    consecutiveFailures: fails,
+    cooldownUntil: h.cooldownUntil,
+    canAttempt: h.circuitState !== 'open',
   };
 }
 
-/**
- * Check if a provider's circuit allows requests
- */
-export function canAttempt(providerId: string): boolean {
-  return getCircuitState(providerId).canAttempt;
+export function canAttempt(pid: string): boolean {
+  return getCircuitState(pid).canAttempt;
 }
 
-/**
- * Record a successful request (resets circuit to closed)
- */
-export function recordSuccess(providerId: string): void {
-  consecutiveFailures.set(providerId, 0);
-  
-  const health = providerRepo.getHealth(providerId);
-  if (health && health.circuitState !== 'closed') {
-    providerRepo.updateCircuitState(providerId, 'closed');
+export function recordSuccess(pid: string): void {
+  failures.set(pid, 0);
+  const h = providerRepo.getHealth(pid);
+  if (h && h.circuitState !== 'closed') {
+    providerRepo.updateCircuitState(pid, 'closed');
   }
 }
 
-/**
- * Record a failed request
- */
-export function recordFailure(providerId: string): void {
-  const failures = (consecutiveFailures.get(providerId) || 0) + 1;
-  consecutiveFailures.set(providerId, failures);
-
-  // Check if we should open the circuit
-  if (failures >= FAILURE_THRESHOLD) {
-    openCircuit(providerId, failures);
-  }
+export function recordFailure(pid: string): void {
+  const f = (failures.get(pid) || 0) + 1;
+  failures.set(pid, f);
+  if (f >= FAIL_THRESHOLD) openCircuit(pid, f);
 }
 
-/**
- * Open the circuit breaker for a provider
- */
-function openCircuit(providerId: string, failures: number): void {
-  // Calculate cooldown with exponential backoff
-  const backoffFactor = Math.pow(COOLDOWN_MULTIPLIER, failures - FAILURE_THRESHOLD);
-  const cooldownMs = Math.min(COOLDOWN_BASE_MS * backoffFactor, COOLDOWN_MAX_MS);
-  const cooldownUntil = new Date(Date.now() + cooldownMs);
-
-  providerRepo.updateCircuitState(providerId, 'open', cooldownUntil);
+function openCircuit(pid: string, f: number): void {
+  const factor = Math.pow(COOLDOWN_MULT, f - FAIL_THRESHOLD);
+  const ms = Math.min(COOLDOWN_BASE * factor, COOLDOWN_MAX);
+  providerRepo.updateCircuitState(pid, 'open', new Date(Date.now() + ms));
 }
 
-/**
- * Apply a rate limit cooldown (from 429 response)
- */
-export function applyRateLimitCooldown(providerId: string, retryAfterMs?: number): void {
-  const cooldownMs = retryAfterMs || COOLDOWN_BASE_MS;
-  const cappedCooldownMs = Math.min(cooldownMs, COOLDOWN_MAX_MS);
-  const cooldownUntil = new Date(Date.now() + cappedCooldownMs);
-
-  providerRepo.setCooldown(providerId, cooldownUntil);
+export function applyRateLimitCooldown(pid: string, retryMs?: number): void {
+  const ms = Math.min(retryMs || COOLDOWN_BASE, COOLDOWN_MAX);
+  providerRepo.setCooldown(pid, new Date(Date.now() + ms));
 }
 
-/**
- * Check if a provider is in cooldown
- */
-export function isInCooldown(providerId: string): boolean {
-  const health = providerRepo.getHealth(providerId);
-  if (!health || !health.cooldownUntil) return false;
-  return Date.now() < health.cooldownUntil;
+export function isInCooldown(pid: string): boolean {
+  const h = providerRepo.getHealth(pid);
+  return h?.cooldownUntil ? Date.now() < h.cooldownUntil : false;
 }
 
-/**
- * Get remaining cooldown time in milliseconds
- */
-export function getCooldownRemaining(providerId: string): number {
-  const health = providerRepo.getHealth(providerId);
-  if (!health || !health.cooldownUntil) return 0;
-  return Math.max(0, health.cooldownUntil - Date.now());
+export function getCooldownRemaining(pid: string): number {
+  const h = providerRepo.getHealth(pid);
+  return h?.cooldownUntil ? Math.max(0, h.cooldownUntil - Date.now()) : 0;
 }
 
-/**
- * Reset circuit breaker state (for testing or manual recovery)
- */
-export function resetCircuit(providerId: string): void {
-  consecutiveFailures.delete(providerId);
-  providerRepo.updateCircuitState(providerId, 'closed');
-  providerRepo.clearCooldown(providerId);
+export function resetCircuit(pid: string): void {
+  failures.delete(pid);
+  providerRepo.updateCircuitState(pid, 'closed');
+  providerRepo.clearCooldown(pid);
 }
 
-/**
- * Get all circuit states for monitoring
- */
 export function getAllCircuitStates(): CircuitBreakerState[] {
-  const healthRecords = providerRepo.getAllHealth();
-  return healthRecords.map(health => getCircuitState(health.providerId));
+  return providerRepo.getAllHealth().map(h => getCircuitState(h.providerId));
 }
-

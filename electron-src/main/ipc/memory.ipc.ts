@@ -1,98 +1,66 @@
-/**
- * Memory IPC Handlers
- * 
- * Handles conversation memory operations:
- * - memory:get - Get memory for a conversation
- * - memory:summarize - Force summarization
- * - memory:addFact - Add a key fact
- * - memory:removeFact - Remove a key fact
- * - memory:clear - Clear memory for a conversation
- */
+// Memory IPC - conversation memory ops
 
 import { IpcMain } from 'electron';
 import { memoryService } from '../services/memory.service.js';
 import { conversationMemoryRepo } from '../database/repositories/index.js';
 
 export function registerMemoryHandlers(ipc: IpcMain): void {
-  /**
-   * Get memory for a conversation
-   */
-  ipc.handle('memory:get', async (_event, conversationId: string) => {
+  ipc.handle('memory:get', async (_e, convId: string) => {
     try {
-      const memory = memoryService.getMemory(conversationId);
-      return memory || { summary: null, keyFacts: [] };
-    } catch (error) {
-      console.error('Failed to get memory:', error);
+      return memoryService.getMemory(convId) || { summary: null, keyFacts: [] };
+    } catch (e) {
+      console.error('memory:get failed:', e);
       return { summary: null, keyFacts: [] };
     }
   });
 
-  /**
-   * Force summarization of a conversation
-   */
-  ipc.handle('memory:summarize', async (_event, conversationId: string) => {
+  ipc.handle('memory:summarize', async (_e, convId: string) => {
     try {
-      const success = await memoryService.forceSummarize(conversationId);
-      if (success) {
-        return { success: true, memory: memoryService.getMemory(conversationId) };
-      }
-      return { success: false, error: 'Summarization failed' };
-    } catch (error) {
-      console.error('Failed to summarize:', error);
-      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+      const ok = await memoryService.forceSummarize(convId);
+      return ok ? { success: true, memory: memoryService.getMemory(convId) } : { success: false, error: 'Summarization failed' };
+    } catch (e) {
+      console.error('memory:summarize failed:', e);
+      return { success: false, error: e instanceof Error ? e.message : 'Unknown error' };
     }
   });
 
-  /**
-   * Add a key fact to a conversation
-   */
-  ipc.handle('memory:addFact', async (_event, conversationId: string, fact: string) => {
+  ipc.handle('memory:addFact', async (_e, convId: string, fact: string) => {
     try {
-      memoryService.addKeyFact(conversationId, fact);
+      memoryService.addKeyFact(convId, fact);
       return { success: true };
-    } catch (error) {
-      console.error('Failed to add fact:', error);
-      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+    } catch (e) {
+      console.error('memory:addFact failed:', e);
+      return { success: false, error: e instanceof Error ? e.message : 'Unknown error' };
     }
   });
 
-  /**
-   * Remove a key fact from a conversation
-   */
-  ipc.handle('memory:removeFact', async (_event, conversationId: string, fact: string) => {
+  ipc.handle('memory:removeFact', async (_e, convId: string, fact: string) => {
     try {
-      memoryService.removeKeyFact(conversationId, fact);
+      memoryService.removeKeyFact(convId, fact);
       return { success: true };
-    } catch (error) {
-      console.error('Failed to remove fact:', error);
-      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+    } catch (e) {
+      console.error('memory:removeFact failed:', e);
+      return { success: false, error: e instanceof Error ? e.message : 'Unknown error' };
     }
   });
 
-  /**
-   * Update key facts for a conversation
-   */
-  ipc.handle('memory:setFacts', async (_event, conversationId: string, facts: string[]) => {
+  ipc.handle('memory:setFacts', async (_e, convId: string, facts: string[]) => {
     try {
-      conversationMemoryRepo.setKeyFacts(conversationId, facts);
+      conversationMemoryRepo.setKeyFacts(convId, facts);
       return { success: true };
-    } catch (error) {
-      console.error('Failed to set facts:', error);
-      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+    } catch (e) {
+      console.error('memory:setFacts failed:', e);
+      return { success: false, error: e instanceof Error ? e.message : 'Unknown error' };
     }
   });
 
-  /**
-   * Clear memory for a conversation
-   */
-  ipc.handle('memory:clear', async (_event, conversationId: string) => {
+  ipc.handle('memory:clear', async (_e, convId: string) => {
     try {
-      memoryService.clearMemory(conversationId);
+      memoryService.clearMemory(convId);
       return { success: true };
-    } catch (error) {
-      console.error('Failed to clear memory:', error);
-      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+    } catch (e) {
+      console.error('memory:clear failed:', e);
+      return { success: false, error: e instanceof Error ? e.message : 'Unknown error' };
     }
   });
 }
-

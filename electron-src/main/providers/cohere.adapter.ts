@@ -1,20 +1,18 @@
+// Cohere adapter - Command R+/R
+
 import {
-  BaseProviderAdapter,
-  GenerateRequest,
-  GenerateResponse,
-  StreamChunk,
-  ConnectionTestResult,
-  NormalizedError,
-  ProviderCapabilities,
-  ChatMessage,
+  BaseProviderAdapter, GenerateRequest, GenerateResponse, StreamChunk,
+  ConnectionTestResult, NormalizedError, ProviderCapabilities, ChatMessage,
 } from './base.js';
 import { modelCacheService } from '../services/model-cache.service.js';
 
-/**
- * Cohere Provider Adapter
- * 
- * Native Cohere API implementation. Supports Command R+, Command R.
- */
+class CohereAPIError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+    this.name = 'CohereAPIError';
+  }
+}
+
 export class CohereAdapter extends BaseProviderAdapter {
   readonly id = 'cohere' as const;
   readonly displayName = 'Cohere';
@@ -26,34 +24,23 @@ export class CohereAdapter extends BaseProviderAdapter {
     supportsVision: false,
     maxContextTokens: 128000,
     defaultModel: 'command-r-plus',
-    availableModels: [
-      'command-r-plus',
-      'command-r',
-      'command',
-      'command-light',
-    ],
+    availableModels: ['command-r-plus', 'command-r', 'command', 'command-light'],
   };
 
-  private readonly baseUrl = 'https://api.cohere.com/v2';
+  private baseUrl = 'https://api.cohere.com/v2';
 
-  async *generate(
-    request: GenerateRequest,
-    apiKey: string,
-    signal?: AbortSignal
-  ): AsyncGenerator<StreamChunk, GenerateResponse, undefined> {
-    // Use cache-aware random model selection if no specific model requested
-    const model = request.model || await modelCacheService.getRandomModel(this.id, apiKey);
-    const startTime = Date.now();
+  async *generate(req: GenerateRequest, apiKey: string, signal?: AbortSignal): AsyncGenerator<StreamChunk, GenerateResponse, undefined> {
+    const model = req.model || await modelCacheService.getRandomModel(this.id, apiKey);
+    const t0 = Date.now();
 
-    let fullContent = '';
-    let promptTokens = 0;
-    let completionTokens = 0;
-    let finishReason: GenerateResponse['finishReason'] = 'stop';
+    let content = '';
+    let promptTok = 0, compTok = 0;
+    let finish: GenerateResponse['finishReason'] = 'stop';
 
-    console.log(`[Cohere] Using model: ${model}`);
+    console.log('cohere:', model);
 
     try {
-      const response = await fetch(`${this.baseUrl}/chat`, {
+      const resp = await fetch(`${this.baseUrl}/chat`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${apiKey}`,
@@ -62,176 +49,109 @@ export class CohereAdapter extends BaseProviderAdapter {
         },
         body: JSON.stringify({
           model,
-          messages: this.convertMessages(request.messages),
-          max_tokens: request.maxTokens,
-          temperature: request.temperature,
-          stop_sequences: request.stopSequences,
+          messages: this.convertMsgs(req.messages),
+          max_tokens: req.maxTokens,
+          temperature: req.temperature,
+          stop_sequences: req.stopSequences,
           stream: true,
         }),
         signal,
       });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new CohereAPIError(response.status, errorText);
+      if (!resp.ok) {
+        throw new CohereAPIError(resp.status, await resp.text());
       }
 
-      const reader = response.body?.getReader();
-      if (!reader) {
-        throw new Error('No response body');
-      }
+      const reader = resp.body?.getReader();
+      if (!reader) throw new Error('No response body');
 
       const decoder = new TextDecoder();
-      let buffer = '';
+      let buf = '';
 
       while (true) {
-        if (signal?.aborted) {
-          reader.cancel();
-          break;
-        }
-
+        if (signal?.aborted) { reader.cancel(); break; }
         const { done, value } = await reader.read();
         if (done) break;
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop() || '';
 
         for (const line of lines) {
           if (!line.trim() || !line.startsWith('data: ')) continue;
-
-          const jsonStr = line.slice(6);
-          if (jsonStr === '[DONE]') continue;
+          const json = line.slice(6);
+          if (json === '[DONE]') continue;
 
           try {
-            const data = JSON.parse(jsonStr);
-
+            const data = JSON.parse(json);
             if (data.type === 'content-delta' && data.delta?.message?.content?.text) {
               const delta = data.delta.message.content.text;
-              fullContent += delta;
+              content += delta;
               yield { type: 'delta', delta };
             }
-
             if (data.type === 'message-end') {
-              if (data.delta?.finish_reason) {
-                finishReason = this.mapFinishReason(data.delta.finish_reason);
-              }
+              if (data.delta?.finish_reason) finish = this.mapFinish(data.delta.finish_reason);
               if (data.delta?.usage) {
-                promptTokens = data.delta.usage.billed_units?.input_tokens || 0;
-                completionTokens = data.delta.usage.billed_units?.output_tokens || 0;
+                promptTok = data.delta.usage.billed_units?.input_tokens || 0;
+                compTok = data.delta.usage.billed_units?.output_tokens || 0;
               }
             }
-          } catch {
-            // Skip invalid JSON lines
-          }
+          } catch { /* skip bad json */ }
         }
       }
 
-      const latencyMs = Date.now() - startTime;
-
+      const latency = Date.now() - t0;
       yield {
         type: 'done',
-        usage: {
-          promptTokens,
-          completionTokens,
-          totalTokens: promptTokens + completionTokens,
-        },
-        model,
-        finishReason,
+        usage: { promptTokens: promptTok, completionTokens: compTok, totalTokens: promptTok + compTok },
+        model, finishReason: finish,
       };
 
       return {
-        content: fullContent,
-        model,
-        usage: {
-          promptTokens,
-          completionTokens,
-          totalTokens: promptTokens + completionTokens,
-        },
-        finishReason,
-        latencyMs,
+        content, model,
+        usage: { promptTokens: promptTok, completionTokens: compTok, totalTokens: promptTok + compTok },
+        finishReason: finish, latencyMs: latency,
       };
-    } catch (error) {
-      const normalized = this.normalizeError(error);
-      yield { type: 'error', error: normalized };
-      throw error;
+    } catch (err) {
+      const norm = this.normalizeError(err);
+      yield { type: 'error', error: norm };
+      throw err;
     }
   }
 
   async testConnection(apiKey: string): Promise<ConnectionTestResult> {
-    const startTime = Date.now();
-
+    const t0 = Date.now();
     try {
-      const response = await fetch(`${this.baseUrl}/models`, {
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-        },
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new CohereAPIError(response.status, errorText);
-      }
-
-      return {
-        success: true,
-        latencyMs: Date.now() - startTime,
-      };
-    } catch (error) {
-      return {
-        success: false,
-        error: this.normalizeError(error),
-        latencyMs: Date.now() - startTime,
-      };
+      const resp = await fetch(`${this.baseUrl}/models`, { headers: { 'Authorization': `Bearer ${apiKey}` } });
+      if (!resp.ok) throw new CohereAPIError(resp.status, await resp.text());
+      return { success: true, latencyMs: Date.now() - t0 };
+    } catch (err) {
+      return { success: false, error: this.normalizeError(err), latencyMs: Date.now() - t0 };
     }
   }
 
-  normalizeError(error: unknown, statusCode?: number): NormalizedError {
-    if (error instanceof CohereAPIError) {
-      if (error.status === 401) {
-        return { type: 'auth', message: 'Invalid Cohere API key' };
-      }
-      if (error.status === 429) {
-        return { type: 'rate_limit', message: error.message };
-      }
-      if (error.status >= 500) {
-        return { type: 'server_error', statusCode: error.status, message: error.message };
-      }
-
-      return { type: 'unknown', message: error.message };
+  normalizeError(err: unknown, status?: number): NormalizedError {
+    if (err instanceof CohereAPIError) {
+      if (err.status === 401) return { type: 'auth', message: 'Invalid Cohere API key' };
+      if (err.status === 429) return { type: 'rate_limit', message: err.message };
+      if (err.status >= 500) return { type: 'server_error', statusCode: err.status, message: err.message };
+      return { type: 'unknown', message: err.message };
     }
-
-    return super.normalizeError(error, statusCode);
+    return super.normalizeError(err, status);
   }
 
-  private convertMessages(messages: ChatMessage[]): Array<{ role: string; content: string }> {
-    return messages.map(m => ({
+  private convertMsgs(msgs: ChatMessage[]): Array<{ role: string; content: string }> {
+    return msgs.map(m => ({
       role: m.role === 'assistant' ? 'assistant' : m.role === 'system' ? 'system' : 'user',
       content: m.content,
     }));
   }
 
-  private mapFinishReason(reason: string): GenerateResponse['finishReason'] {
-    switch (reason) {
-      case 'COMPLETE':
-        return 'stop';
-      case 'MAX_TOKENS':
-        return 'length';
-      case 'STOP_SEQUENCE':
-        return 'stop';
-      default:
-        return 'stop';
-    }
+  private mapFinish(r: string): GenerateResponse['finishReason'] {
+    if (r === 'MAX_TOKENS') return 'length';
+    return 'stop';
   }
 }
 
-class CohereAPIError extends Error {
-  constructor(public status: number, message: string) {
-    super(message);
-    this.name = 'CohereAPIError';
-  }
-}
-
-// Export singleton instance
 export const cohereAdapter = new CohereAdapter();
 

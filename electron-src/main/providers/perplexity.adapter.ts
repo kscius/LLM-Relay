@@ -1,21 +1,12 @@
+// Perplexity adapter - web-connected AI
+
 import OpenAI from 'openai';
 import {
-  BaseProviderAdapter,
-  GenerateRequest,
-  GenerateResponse,
-  StreamChunk,
-  ConnectionTestResult,
-  NormalizedError,
-  ProviderCapabilities,
+  BaseProviderAdapter, GenerateRequest, GenerateResponse, StreamChunk,
+  ConnectionTestResult, NormalizedError, ProviderCapabilities,
 } from './base.js';
 import { modelCacheService } from '../services/model-cache.service.js';
 
-/**
- * Perplexity Provider Adapter
- * 
- * Web-connected AI with real-time information access.
- * Uses OpenAI-compatible API with Sonar models.
- */
 export class PerplexityAdapter extends BaseProviderAdapter {
   readonly id = 'perplexity' as const;
   readonly displayName = 'Perplexity';
@@ -27,171 +18,98 @@ export class PerplexityAdapter extends BaseProviderAdapter {
     supportsVision: false,
     maxContextTokens: 127072,
     defaultModel: 'sonar',
-    availableModels: [
-      'sonar',
-      'sonar-pro',
-      'sonar-reasoning',
-      'sonar-reasoning-pro',
-      'sonar-deep-research',
-    ],
+    availableModels: ['sonar', 'sonar-pro', 'sonar-reasoning', 'sonar-reasoning-pro', 'sonar-deep-research'],
   };
 
-  private createClient(apiKey: string): OpenAI {
-    return new OpenAI({
-      apiKey,
-      baseURL: 'https://api.perplexity.ai',
-    });
+  private client(key: string): OpenAI {
+    return new OpenAI({ apiKey: key, baseURL: 'https://api.perplexity.ai' });
   }
 
-  async *generate(
-    request: GenerateRequest,
-    apiKey: string,
-    signal?: AbortSignal
-  ): AsyncGenerator<StreamChunk, GenerateResponse, undefined> {
-    const client = this.createClient(apiKey);
-    const model = request.model || await modelCacheService.getRandomModel(this.id, apiKey);
-    const startTime = Date.now();
+  async *generate(req: GenerateRequest, apiKey: string, signal?: AbortSignal): AsyncGenerator<StreamChunk, GenerateResponse, undefined> {
+    const cli = this.client(apiKey);
+    const model = req.model || await modelCacheService.getRandomModel(this.id, apiKey);
+    const t0 = Date.now();
 
-    let fullContent = '';
-    let promptTokens = 0;
-    let completionTokens = 0;
-    let finishReason: GenerateResponse['finishReason'] = 'stop';
+    let content = '';
+    let promptTok = 0, compTok = 0;
+    let finish: GenerateResponse['finishReason'] = 'stop';
 
-    console.log(`[Perplexity] Using model: ${model}`);
+    console.log('perplexity:', model);
 
     try {
-      const stream = await client.chat.completions.create(
-        {
-          model,
-          messages: request.messages.map(m => ({
-            role: m.role,
-            content: m.content,
-          })),
-          max_tokens: request.maxTokens,
-          temperature: request.temperature,
-          stream: true,
-        },
-        { signal }
-      );
+      const stream = await cli.chat.completions.create({
+        model,
+        messages: req.messages.map(m => ({ role: m.role, content: m.content })),
+        max_tokens: req.maxTokens,
+        temperature: req.temperature,
+        stream: true,
+      }, { signal });
 
       for await (const chunk of stream) {
-        if (signal?.aborted) {
-          break;
-        }
-
+        if (signal?.aborted) break;
         const choice = chunk.choices[0];
-        
         if (choice?.delta?.content) {
-          const delta = choice.delta.content;
-          fullContent += delta;
-          yield { type: 'delta', delta };
+          content += choice.delta.content;
+          yield { type: 'delta', delta: choice.delta.content };
         }
-
-        if (choice?.finish_reason) {
-          finishReason = this.mapFinishReason(choice.finish_reason);
-        }
-
+        if (choice?.finish_reason) finish = this.mapFinish(choice.finish_reason);
         if (chunk.usage) {
-          promptTokens = chunk.usage.prompt_tokens;
-          completionTokens = chunk.usage.completion_tokens;
+          promptTok = chunk.usage.prompt_tokens;
+          compTok = chunk.usage.completion_tokens;
         }
       }
 
-      const latencyMs = Date.now() - startTime;
-
+      const latency = Date.now() - t0;
       yield {
         type: 'done',
-        usage: {
-          promptTokens,
-          completionTokens,
-          totalTokens: promptTokens + completionTokens,
-        },
-        model,
-        finishReason,
+        usage: { promptTokens: promptTok, completionTokens: compTok, totalTokens: promptTok + compTok },
+        model, finishReason: finish,
       };
 
       return {
-        content: fullContent,
-        model,
-        usage: {
-          promptTokens,
-          completionTokens,
-          totalTokens: promptTokens + completionTokens,
-        },
-        finishReason,
-        latencyMs,
+        content, model,
+        usage: { promptTokens: promptTok, completionTokens: compTok, totalTokens: promptTok + compTok },
+        finishReason: finish, latencyMs: latency,
       };
-    } catch (error) {
-      const normalized = this.normalizeError(error);
-      yield { type: 'error', error: normalized };
-      throw error;
+    } catch (err) {
+      const norm = this.normalizeError(err);
+      yield { type: 'error', error: norm };
+      throw err;
     }
   }
 
   async testConnection(apiKey: string): Promise<ConnectionTestResult> {
-    const client = this.createClient(apiKey);
-    const startTime = Date.now();
-
+    const t0 = Date.now();
     try {
-      // Perplexity doesn't have a models endpoint, make a minimal chat call
-      await client.chat.completions.create({
-        model: 'sonar',
-        messages: [{ role: 'user', content: 'Hi' }],
-        max_tokens: 1,
+      // no models endpoint, make minimal call
+      await this.client(apiKey).chat.completions.create({
+        model: 'sonar', messages: [{ role: 'user', content: 'Hi' }], max_tokens: 1,
       });
-      
-      return {
-        success: true,
-        latencyMs: Date.now() - startTime,
-      };
-    } catch (error) {
-      return {
-        success: false,
-        error: this.normalizeError(error),
-        latencyMs: Date.now() - startTime,
-      };
+      return { success: true, latencyMs: Date.now() - t0 };
+    } catch (err) {
+      return { success: false, error: this.normalizeError(err), latencyMs: Date.now() - t0 };
     }
   }
 
-  normalizeError(error: unknown, statusCode?: number): NormalizedError {
-    if (error instanceof OpenAI.APIError) {
-      const status = error.status;
-
-      if (status === 401) {
-        return { type: 'auth', message: 'Invalid Perplexity API key' };
+  normalizeError(err: unknown, status?: number): NormalizedError {
+    if (err instanceof OpenAI.APIError) {
+      if (err.status === 401) return { type: 'auth', message: 'Invalid Perplexity API key' };
+      if (err.status === 402) return { type: 'billing', message: 'Perplexity billing issue' };
+      if (err.status === 429) {
+        const retry = err.headers?.['retry-after'];
+        return { type: 'rate_limit', retryAfterMs: retry ? parseInt(retry, 10) * 1000 : undefined, message: err.message };
       }
-      if (status === 402) {
-        return { type: 'billing', message: 'Perplexity billing issue' };
-      }
-      if (status === 429) {
-        const retryAfter = error.headers?.['retry-after'];
-        const retryAfterMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : undefined;
-        return { type: 'rate_limit', retryAfterMs, message: error.message };
-      }
-      if (status && status >= 500) {
-        return { type: 'server_error', statusCode: status, message: error.message };
-      }
-
-      return { type: 'unknown', message: error.message };
+      if (err.status && err.status >= 500) return { type: 'server_error', statusCode: err.status, message: err.message };
+      return { type: 'unknown', message: err.message };
     }
-
-    return super.normalizeError(error, statusCode);
+    return super.normalizeError(err, status);
   }
 
-  private mapFinishReason(reason: string): GenerateResponse['finishReason'] {
-    switch (reason) {
-      case 'stop':
-        return 'stop';
-      case 'length':
-        return 'length';
-      case 'content_filter':
-        return 'content_filter';
-      default:
-        return 'stop';
-    }
+  private mapFinish(r: string): GenerateResponse['finishReason'] {
+    if (r === 'length') return 'length';
+    if (r === 'content_filter') return 'content_filter';
+    return 'stop';
   }
 }
 
-// Export singleton instance
 export const perplexityAdapter = new PerplexityAdapter();
-

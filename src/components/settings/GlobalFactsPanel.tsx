@@ -309,7 +309,7 @@ export default function GlobalFactsPanel() {
         <p className="font-medium text-surface-300 mb-2">💡 How Global Memory Works</p>
         <ul className="space-y-1 list-disc list-inside">
           <li>Facts are automatically extracted from your conversations</li>
-          <li>They're included in every new message to provide context</li>
+          <li>They&apos;re included in every new message to provide context</li>
           <li>Higher confidence facts are prioritized</li>
           <li>You can add, edit, or remove facts manually</li>
         </ul>

@@ -1,21 +1,12 @@
+// Anthropic adapter - Claude models
+
 import Anthropic from '@anthropic-ai/sdk';
 import {
-  BaseProviderAdapter,
-  GenerateRequest,
-  GenerateResponse,
-  StreamChunk,
-  ConnectionTestResult,
-  NormalizedError,
-  ProviderCapabilities,
+  BaseProviderAdapter, GenerateRequest, GenerateResponse, StreamChunk,
+  ConnectionTestResult, NormalizedError, ProviderCapabilities,
 } from './base.js';
 import { modelCacheService } from '../services/model-cache.service.js';
 
-/**
- * Anthropic Provider Adapter
- * 
- * Creator of Claude models. Known for safety and coding capabilities.
- * Uses the official Anthropic API with x-api-key authentication.
- */
 export class AnthropicAdapter extends BaseProviderAdapter {
   readonly id = 'anthropic' as const;
   readonly displayName = 'Anthropic';
@@ -28,188 +19,110 @@ export class AnthropicAdapter extends BaseProviderAdapter {
     maxContextTokens: 200000,
     defaultModel: 'claude-sonnet-4-20250514',
     availableModels: [
-      'claude-sonnet-4-20250514',
-      'claude-3-5-sonnet-20241022',
-      'claude-3-5-haiku-20241022',
-      'claude-3-opus-20240229',
-      'claude-3-haiku-20240307',
+      'claude-sonnet-4-20250514', 'claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022',
+      'claude-3-opus-20240229', 'claude-3-haiku-20240307',
     ],
   };
 
-  private createClient(apiKey: string): Anthropic {
-    return new Anthropic({
-      apiKey,
-    });
+  private client(key: string): Anthropic {
+    return new Anthropic({ apiKey: key });
   }
 
-  async *generate(
-    request: GenerateRequest,
-    apiKey: string,
-    signal?: AbortSignal
-  ): AsyncGenerator<StreamChunk, GenerateResponse, undefined> {
-    const client = this.createClient(apiKey);
-    const model = request.model || await modelCacheService.getRandomModel(this.id, apiKey);
-    const startTime = Date.now();
+  async *generate(req: GenerateRequest, apiKey: string, signal?: AbortSignal): AsyncGenerator<StreamChunk, GenerateResponse, undefined> {
+    const cli = this.client(apiKey);
+    const model = req.model || await modelCacheService.getRandomModel(this.id, apiKey);
+    const t0 = Date.now();
 
-    let fullContent = '';
-    let promptTokens = 0;
-    let completionTokens = 0;
-    let finishReason: GenerateResponse['finishReason'] = 'stop';
+    let content = '';
+    let promptTok = 0, compTok = 0;
+    let finish: GenerateResponse['finishReason'] = 'stop';
 
-    console.log(`[Anthropic] Using model: ${model}`);
+    console.log('anthropic:', model);
 
-    // Extract system message if present
-    const systemMessage = request.messages.find(m => m.role === 'system');
-    const nonSystemMessages = request.messages.filter(m => m.role !== 'system');
+    const sysMsg = req.messages.find(m => m.role === 'system');
+    const msgs = req.messages.filter(m => m.role !== 'system');
 
     try {
-      const stream = client.messages.stream(
-        {
-          model,
-          system: systemMessage?.content,
-          messages: nonSystemMessages.map(m => ({
-            role: m.role as 'user' | 'assistant',
-            content: m.content,
-          })),
-          max_tokens: request.maxTokens || 4096,
-          temperature: request.temperature,
-          stop_sequences: request.stopSequences,
-        },
-        { signal }
-      );
+      const stream = cli.messages.stream({
+        model,
+        system: sysMsg?.content,
+        messages: msgs.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
+        max_tokens: req.maxTokens || 4096,
+        temperature: req.temperature,
+        stop_sequences: req.stopSequences,
+      }, { signal });
 
-      for await (const event of stream) {
-        if (signal?.aborted) {
-          break;
+      for await (const ev of stream) {
+        if (signal?.aborted) break;
+
+        if (ev.type === 'content_block_delta' && ev.delta.type === 'text_delta') {
+          content += ev.delta.text;
+          yield { type: 'delta', delta: ev.delta.text };
         }
-
-        if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-          const delta = event.delta.text;
-          fullContent += delta;
-          yield { type: 'delta', delta };
-        }
-
-        if (event.type === 'message_delta' && event.usage) {
-          completionTokens = event.usage.output_tokens;
-        }
-
-        if (event.type === 'message_stop') {
-          // Message completed
+        if (ev.type === 'message_delta' && ev.usage) {
+          compTok = ev.usage.output_tokens;
         }
       }
 
-      // Get final message for usage info
-      const finalMessage = await stream.finalMessage();
-      promptTokens = finalMessage.usage.input_tokens;
-      completionTokens = finalMessage.usage.output_tokens;
-      finishReason = this.mapStopReason(finalMessage.stop_reason);
+      const final = await stream.finalMessage();
+      promptTok = final.usage.input_tokens;
+      compTok = final.usage.output_tokens;
+      finish = this.mapStop(final.stop_reason);
 
-      const latencyMs = Date.now() - startTime;
-
+      const latency = Date.now() - t0;
       yield {
         type: 'done',
-        usage: {
-          promptTokens,
-          completionTokens,
-          totalTokens: promptTokens + completionTokens,
-        },
-        model,
-        finishReason,
+        usage: { promptTokens: promptTok, completionTokens: compTok, totalTokens: promptTok + compTok },
+        model, finishReason: finish,
       };
 
       return {
-        content: fullContent,
-        model,
-        usage: {
-          promptTokens,
-          completionTokens,
-          totalTokens: promptTokens + completionTokens,
-        },
-        finishReason,
-        latencyMs,
+        content, model,
+        usage: { promptTokens: promptTok, completionTokens: compTok, totalTokens: promptTok + compTok },
+        finishReason: finish, latencyMs: latency,
       };
-    } catch (error) {
-      const normalized = this.normalizeError(error);
-      yield { type: 'error', error: normalized };
-      throw error;
+    } catch (err) {
+      const norm = this.normalizeError(err);
+      yield { type: 'error', error: norm };
+      throw err;
     }
   }
 
   async testConnection(apiKey: string): Promise<ConnectionTestResult> {
-    const client = this.createClient(apiKey);
-    const startTime = Date.now();
-
+    const t0 = Date.now();
     try {
-      // Anthropic doesn't have a models.list endpoint, so we make a minimal API call
-      await client.messages.create({
+      // no models.list, make minimal call
+      await this.client(apiKey).messages.create({
         model: 'claude-3-haiku-20240307',
         max_tokens: 1,
         messages: [{ role: 'user', content: 'Hi' }],
       });
-      
-      return {
-        success: true,
-        latencyMs: Date.now() - startTime,
-      };
-    } catch (error) {
-      // Check if it's just a rate limit or billing error (key is valid)
-      if (error instanceof Anthropic.APIError) {
-        if (error.status === 529) {
-          // Overloaded but key is valid
-          return {
-            success: true,
-            latencyMs: Date.now() - startTime,
-          };
-        }
+      return { success: true, latencyMs: Date.now() - t0 };
+    } catch (err) {
+      // 529 = overloaded but key valid
+      if (err instanceof Anthropic.APIError && err.status === 529) {
+        return { success: true, latencyMs: Date.now() - t0 };
       }
-      
-      return {
-        success: false,
-        error: this.normalizeError(error),
-        latencyMs: Date.now() - startTime,
-      };
+      return { success: false, error: this.normalizeError(err), latencyMs: Date.now() - t0 };
     }
   }
 
-  normalizeError(error: unknown, statusCode?: number): NormalizedError {
-    if (error instanceof Anthropic.APIError) {
-      const status = error.status;
-
-      if (status === 401) {
-        return { type: 'auth', message: 'Invalid Anthropic API key' };
-      }
-      if (status === 402 || status === 403) {
-        return { type: 'billing', message: 'Anthropic billing issue - check your subscription' };
-      }
-      if (status === 429) {
-        return { type: 'rate_limit', message: error.message };
-      }
-      if (status === 529) {
-        return { type: 'server_error', statusCode: status, message: 'Anthropic API is overloaded' };
-      }
-      if (status && status >= 500) {
-        return { type: 'server_error', statusCode: status, message: error.message };
-      }
-
-      return { type: 'unknown', message: error.message };
+  normalizeError(err: unknown, status?: number): NormalizedError {
+    if (err instanceof Anthropic.APIError) {
+      if (err.status === 401) return { type: 'auth', message: 'Invalid Anthropic API key' };
+      if (err.status === 402 || err.status === 403) return { type: 'billing', message: 'Anthropic billing issue' };
+      if (err.status === 429) return { type: 'rate_limit', message: err.message };
+      if (err.status === 529) return { type: 'server_error', statusCode: 529, message: 'Anthropic overloaded' };
+      if (err.status && err.status >= 500) return { type: 'server_error', statusCode: err.status, message: err.message };
+      return { type: 'unknown', message: err.message };
     }
-
-    return super.normalizeError(error, statusCode);
+    return super.normalizeError(err, status);
   }
 
-  private mapStopReason(reason: string | null): GenerateResponse['finishReason'] {
-    switch (reason) {
-      case 'end_turn':
-      case 'stop_sequence':
-        return 'stop';
-      case 'max_tokens':
-        return 'length';
-      default:
-        return 'stop';
-    }
+  private mapStop(r: string | null): GenerateResponse['finishReason'] {
+    if (r === 'max_tokens') return 'length';
+    return 'stop';
   }
 }
 
-// Export singleton instance
 export const anthropicAdapter = new AnthropicAdapter();
-
