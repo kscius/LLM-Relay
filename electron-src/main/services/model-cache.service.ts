@@ -218,23 +218,47 @@ class ModelCacheService {
   private isChatModel(providerId: string, modelId: string): boolean {
     const id = modelId.toLowerCase();
 
-    // Exclude embedding, whisper, dall-e, tts, moderation models
-    if (id.includes('embed') || id.includes('whisper') || id.includes('dall-e') || 
-        id.includes('tts') || id.includes('moderation') || id.includes('realtime')) {
-      return false;
+    // Global exclusions - models that are NOT for chat/completion
+    const excludePatterns = [
+      'embed',           // Embedding models
+      'whisper',         // Speech-to-text
+      'dall-e',          // Image generation
+      'tts',             // Text-to-speech
+      'moderation',      // Content moderation
+      'realtime',        // Realtime API
+      'guard',           // Safety/guard models (e.g., llama-prompt-guard)
+      'vision',          // Vision-only models (unless also chat)
+      'ocr',             // OCR models
+      'transcription',   // Audio transcription
+      'classification',  // Classification models
+      'rerank',          // Reranking models
+      'detector',        // Detection models
+    ];
+
+    for (const pattern of excludePatterns) {
+      if (id.includes(pattern)) {
+        return false;
+      }
     }
 
     // Provider-specific filters
     if (providerId === 'mistral') {
-      return id.includes('mistral') || id.includes('mixtral') || id.includes('codestral');
+      // Only include known chat/instruction models
+      return (id.includes('mistral') || id.includes('mixtral') || id.includes('codestral')) &&
+             !id.includes('embed');
     }
 
     if (providerId === 'groq') {
-      return id.includes('llama') || id.includes('mixtral') || id.includes('gemma');
+      // Include Llama, Mixtral, Gemma - but exclude non-chat variants
+      const isValidFamily = id.includes('llama') || id.includes('mixtral') || id.includes('gemma');
+      // Exclude specialized models that aren't for chat
+      const isNonChat = id.includes('guard') || id.includes('vision') || id.includes('scout') ||
+                        id.includes('maverick') && id.includes('128e'); // 128e = experimental
+      return isValidFamily && !isNonChat;
     }
 
     if (providerId === 'openai') {
-      // Only include GPT and o1 models
+      // Only include GPT and o1/o3 models
       return id.includes('gpt') || id.startsWith('o1') || id.startsWith('o3');
     }
 
@@ -251,7 +275,12 @@ class ModelCacheService {
       return id.includes('sonar');
     }
 
-    // For most providers, accept all non-embedding models
+    if (providerId === 'deepseek') {
+      return id.includes('deepseek') && (id.includes('chat') || id.includes('coder') || 
+             id.includes('reasoner') || !id.includes('-'));
+    }
+
+    // For most providers, accept all non-excluded models
     return true;
   }
 

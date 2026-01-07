@@ -96,16 +96,24 @@ class ModelsCacheRepository {
     const now = new Date();
     const expiresAt = new Date(now.getTime() + CACHE_TTL_MS);
     
-    // Delete old cache for this provider
+    // Delete old cache for this provider first
     const deleteStmt = db.prepare('DELETE FROM models_cache WHERE provider_id = ?');
     deleteStmt.bind([providerId]);
     deleteStmt.step();
     deleteStmt.free();
     
-    // Insert new models using db.run for simplicity (sql.js doesn't have statement reset)
+    // Deduplicate models by ID (some APIs return duplicates)
+    const uniqueModels = new Map<string, { id: string; name?: string; contextLength?: number }>();
     for (const model of models) {
+      if (!uniqueModels.has(model.id)) {
+        uniqueModels.set(model.id, model);
+      }
+    }
+    
+    // Insert new models using INSERT OR REPLACE to handle any edge cases
+    for (const model of uniqueModels.values()) {
       db.run(
-        `INSERT INTO models_cache (provider_id, model_id, display_name, context_length, is_available, cached_at, expires_at)
+        `INSERT OR REPLACE INTO models_cache (provider_id, model_id, display_name, context_length, is_available, cached_at, expires_at)
          VALUES (?, ?, ?, ?, 1, ?, ?)`,
         [
           providerId,
@@ -118,7 +126,7 @@ class ModelsCacheRepository {
       );
     }
     
-    console.log(`[ModelCache] Updated ${models.length} models for ${providerId}, expires at ${expiresAt.toISOString()}`);
+    console.log(`[ModelCache] Updated ${uniqueModels.size} models for ${providerId}, expires at ${expiresAt.toISOString()}`);
   }
 
   /**
