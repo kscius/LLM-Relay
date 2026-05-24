@@ -41,6 +41,10 @@ win:
     - nsis
     - portable
   icon: build/icon.ico
+  signAndEditExecutable: false
+
+portable:
+  artifactName: ${productName}-Portable-${version}.${ext}
 
 linux:
   target:

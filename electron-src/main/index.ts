@@ -1,6 +1,9 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { configurePortablePaths } from './portable.js';
+
+configurePortablePaths();
 import { initDatabase, closeDatabase } from './database/sqlite.js';
 import { runMigrations } from './database/migrator.js';
 import { registerChatHandlers } from './ipc/chat.ipc.js';
@@ -32,7 +35,7 @@ async function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: false, // Disabled to allow ESM preload
-      preload: path.join(__dirname, '../preload/index.cjs'),
+      preload: path.join(__dirname, '../preload/index.js'),
     },
   });
 

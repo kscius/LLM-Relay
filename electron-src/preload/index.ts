@@ -1,7 +1,5 @@
 /**
- * Preload source (ESM). The running app loads `electron/preload/index.cjs` instead —
- * `tsconfig.node.json` excludes this folder from `tsc`. When you add IPC bridge methods,
- * update **both** this file and `electron/preload/index.cjs` so they stay aligned.
+ * Preload bridge (CommonJS). Compiled via `tsconfig.preload.json` to `electron/preload/index.js`.
  */
 import { contextBridge, ipcRenderer } from 'electron';
 

@@ -49,7 +49,8 @@ Opens on port 5190.
 | `npm run dev` | Dev mode |
 | `npm run build` | Production build |
 | `npm run package` | Package for current OS |
-| `npm run package:win` | Windows installer |
+| `npm run package:win` | Windows installer + portable `.exe` |
+| `npm run package:win:portable` | Solo portable (sin instalador) |
 | `npm run package:mac` | macOS DMG |
 | `npm run package:linux` | AppImage/DEB/RPM |
 | `npm run lint` | Lint check |
@@ -71,11 +72,22 @@ Opens on port 5190.
 3. Weighted random selection
 4. Up to 6 retries on failure
 
+## Windows portable
+
+```bash
+npm run package:win:portable
+```
+
+Genera `dist-electron/LLM Relay-Portable-<version>.exe`. Puedes copiarlo a una carpeta o USB y ejecutarlo sin instalación. Los datos (SQLite y configuración) se guardan en una carpeta `data/` junto al `.exe`.
+
+Para instalador + portable: `npm run package:win`.
+
 ## Data location
 
 | OS | Path |
 |----|------|
-| Windows | `%APPDATA%/llm-relay/llm-relay.sqlite` |
+| Windows (instalador) | `%APPDATA%/llm-relay/llm-relay.sqlite` |
+| Windows (portable) | `<carpeta-del-exe>/data/llm-relay.sqlite` |
 | macOS | `~/Library/Application Support/llm-relay/` |
 | Linux | `~/.config/llm-relay/` |
 

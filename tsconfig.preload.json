@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": false,
+    "outDir": "electron/preload",
+    "rootDir": "electron-src/preload",
+    "sourceMap": true,
+    "isolatedModules": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["electron-src/preload/**/*"],
+  "exclude": ["node_modules"]
+}
