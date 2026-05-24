@@ -79,6 +79,16 @@ export default function SettingsPage() {
     return window.api.providers.testExistingKey(providerId);
   };
 
+  const handleCopySavedKey = async (providerId: string) => {
+    if (!window.api) return { success: false, error: 'API not available' };
+    return window.api.providers.copySavedKey(providerId);
+  };
+
+  const handleRevealSavedKey = async (providerId: string) => {
+    if (!window.api) return { success: false, error: 'API not available' };
+    return window.api.providers.revealSavedKey(providerId);
+  };
+
   const toggleProviderBadge = async () => {
     if (!window.api) return;
 
@@ -143,6 +153,8 @@ export default function SettingsPage() {
                     onRemoveKey={() => handleRemoveKey(provider.id)}
                     onTestKey={(apiKey) => handleTestKey(provider.id, apiKey)}
                     onTestExistingKey={() => handleTestExistingKey(provider.id)}
+                    onCopySavedKey={() => handleCopySavedKey(provider.id)}
+                    onRevealSavedKey={() => handleRevealSavedKey(provider.id)}
                   />
                 ))}
               </div>

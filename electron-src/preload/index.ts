@@ -1,3 +1,8 @@
+/**
+ * Preload source (ESM). The running app loads `electron/preload/index.cjs` instead —
+ * `tsconfig.node.json` excludes this folder from `tsc`. When you add IPC bridge methods,
+ * update **both** this file and `electron/preload/index.cjs` so they stay aligned.
+ */
 import { contextBridge, ipcRenderer } from 'electron';
 
 // Type definitions matching src/lib/api.ts
@@ -69,6 +74,12 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.invoke('provider:remove', providerId),
     testKey: (request: ProviderKeyRequest) =>
       ipcRenderer.invoke('provider:test', request),
+    testExistingKey: (providerId: string) =>
+      ipcRenderer.invoke('provider:testExisting', providerId),
+    copySavedKey: (providerId: string) =>
+      ipcRenderer.invoke('provider:copySavedKey', providerId),
+    revealSavedKey: (providerId: string) =>
+      ipcRenderer.invoke('provider:revealSavedKey', providerId),
     getHealth: () => ipcRenderer.invoke('provider:health'),
   },
 

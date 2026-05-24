@@ -66,6 +66,8 @@ export interface ElectronAPI {
     removeKey: (providerId: string) => Promise<boolean>;
     testKey: (request: ProviderKeyRequest) => Promise<{ success: boolean; error?: string; latencyMs?: number }>;
     testExistingKey: (providerId: string) => Promise<{ success: boolean; error?: string; latencyMs?: number }>;
+    copySavedKey: (providerId: string) => Promise<{ success: boolean; error?: string }>;
+    revealSavedKey: (providerId: string) => Promise<{ success: boolean; apiKey?: string; error?: string }>;
     getHealth: () => Promise<Record<string, { score: number; status: string }>>;
   };
 

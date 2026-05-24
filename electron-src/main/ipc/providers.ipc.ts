@@ -6,10 +6,12 @@
  * - provider:add - Add/update an API key
  * - provider:remove - Remove an API key
  * - provider:test - Test an API key
+ * - provider:copySavedKey - Copy decrypted saved key to system clipboard
+ * - provider:revealSavedKey - Return decrypted saved key for on-screen display
  * - provider:health - Get health status for all providers
  */
 
-import { IpcMain } from 'electron';
+import { IpcMain, clipboard } from 'electron';
 import { providerRepo } from '../database/repositories/index.js';
 import { providerRegistry, type ProviderId } from '../providers/index.js';
 import { getAllProviderHealth } from '../router/health.js';
@@ -152,6 +154,41 @@ export function registerProviderHandlers(ipc: IpcMain): void {
   /**
    * Test an existing (saved) API key
    */
+  /**
+   * Copy the saved (decrypted) API key to the system clipboard
+   */
+  ipc.handle('provider:copySavedKey', async (_event, providerId: string) => {
+    try {
+      const apiKey = providerRepo.getKey(providerId);
+      if (!apiKey) {
+        return { success: false, error: 'No API key saved for this provider' };
+      }
+      clipboard.writeText(apiKey);
+      return { success: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      console.error('Failed to copy saved provider key:', error);
+      return { success: false, error: message };
+    }
+  });
+
+  /**
+   * Return the saved (decrypted) API key for display in the UI (user confirmed intent)
+   */
+  ipc.handle('provider:revealSavedKey', async (_event, providerId: string) => {
+    try {
+      const apiKey = providerRepo.getKey(providerId);
+      if (!apiKey) {
+        return { success: false, error: 'No API key saved for this provider' };
+      }
+      return { success: true, apiKey };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      console.error('Failed to reveal saved provider key:', error);
+      return { success: false, error: message };
+    }
+  });
+
   ipc.handle('provider:testExisting', async (_event, providerId: string) => {
     try {
       // Get the saved key
